@@ -1,0 +1,89 @@
+version: "2"
+
+volumes:
+  postgres-data:    # The postgres data store volume
+    driver: local
+  redis-data:       # The redis data store volume
+    driver: local
+  rabbit-data:       # The rabbitmq data store volume
+    driver: local
+  wallets-gems:     # The volume where all gems will be stored
+    driver: local
+  users-gems:       # The volume where all gems will be stored
+    driver: local
+
+services:
+  db:
+    image: postgres:9.5.2
+    # Bind host port 5432 to PostgreSQL port 5432:
+    ports: [ "5432:5432" ]
+    # We're mounting 'db/dumps' into the postgres container so we can backup and
+    # restore data dumps easily:
+    volumes:
+      - postgres-data:/var/lib/postgresql/data # Mount the postgres data volume
+    environment:
+      LC_ALL: C.UTF-8
+      POSTGRES_PASSWORD: 3x4mpl3
+
+  keyval:
+    image: redis:3.0.7
+    ports: [ "6379:6379" ]
+    volumes:
+      - redis-data:/data # Mount the redis data volume
+    command: redis-server --appendonly yes
+
+  amqp:
+    image: rabbitmq:3.6.1-management
+    ports: [ "15672:15672" ]
+    volumes:
+      - rabbit-data:/var/lib/rabbitmq # Mount the rabbit data volume
+
+  # Application containers (sidekiq, rails, actioncable) -----------------------
+  wallets-subscriber: &app_base
+    image: ruby:2.3.0
+    entrypoint: /usr/src/app/development-entrypoint
+    command: bundle exec hutch --autoload-rails
+    volumes:
+      # Mount the wallets app code directory ("./users") into our app containers
+      # at the "/usr/src/app" folder:
+      - ./wallets:/usr/src/app/
+
+      # Mount the 'wallets-gems' volume on the folder that stores bundled gems:
+      - wallets-gems:/usr/local/bundle
+    working_dir: /usr/src/app
+    stdin_open: true
+    tty: true
+    environment: &app_env
+      PATH: /usr/src/app/bin:/usr/local/bundle/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      DATABASE_URL: postgres://postgres:3x4mpl3@db:5432/wallets_development?pool=25&encoding=unicode&schema_search_path=public
+      REDIS_URL: redis://keyval:6379/wallets
+      AMQP_URL: amqp://guest:guest@amqp:5672
+      RACK_ENV: development
+      RAILS_ENV: development
+      # Allow the `top` command to run out-of-the-box without complaining by
+      # by configuring a terminal emulator:
+      TERM: xterm
+    links:
+      - db
+      - keyval
+      - amqp
+
+  wallets-web: &web_app_base
+    <<: *app_base
+    command: bundle exec rails server -p 3000 -b 0.0.0.0
+    ports: [ "3000:3000"]
+
+  users-web:
+    <<: *web_app_base
+    ports: [ "3001:3000"]
+    volumes:
+      # Mount the users app code directory ("./users") into our app containers
+      # at the "/usr/src/app" folder:
+      - ./users:/usr/src/app/
+
+      # Mount the 'users-gems' volume on the folder that stores bundled gems:
+      - users-gems:/usr/local/bundle
+    environment:
+      <<: *app_env
+      DATABASE_URL: postgres://postgres:3x4mpl3@db:5432/users_development?pool=25&encoding=unicode&schema_search_path=public
+      REDIS_URL: redis://keyval:6379/users
